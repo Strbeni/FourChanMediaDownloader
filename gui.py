@@ -35,10 +35,11 @@ class ChanMediaScanner(ctk.CTk):
                 self.download_path = os.getcwd()
 
         self.url_cache = {}  # URL -> list of media links
+        self.image_cache = {} # URL -> key/image_data
         self.current_media = []
-        self.current_page = 0
-        self.items_per_page = 15 # Grid view needs more items (3 rows of 5)
+        self.visible_limit = 16 # Start with 4 rows of 4
         self.selected_urls = set()
+        self.active_vars = {} # url -> BooleanVar for currently visible items
         
         # UI Setup
         self.create_sidebar()
@@ -108,22 +109,19 @@ class ChanMediaScanner(ctk.CTk):
         # Preview Section (Scrollable Frame)
         self.preview_frame = ctk.CTkScrollableFrame(self.media_frame, label_text="Media Preview")
         self.preview_frame.grid(row=2, column=0, padx=20, pady=10, sticky="nsew")
-        # Grid layout for images (5 columns)
-        for i in range(5):
+        # Grid layout for images (4 columns)
+        for i in range(4):
             self.preview_frame.grid_columnconfigure(i, weight=1)
 
         # Pagination Controls
         self.controls_frame = ctk.CTkFrame(self.media_frame, fg_color="transparent")
         self.controls_frame.grid(row=3, column=0, padx=20, pady=20, sticky="ew")
         
-        self.btn_prev = ctk.CTkButton(self.controls_frame, text="<< Previous", width=100, command=self.prev_page, state="disabled")
-        self.btn_prev.pack(side="left")
-        
-        self.lbl_page = ctk.CTkLabel(self.controls_frame, text="Page 0 of 0", text_color="gray")
-        self.lbl_page.pack(side="left", padx=20, expand=True)
+        self.btn_show_more = ctk.CTkButton(self.controls_frame, text="Show More", width=120, command=self.show_more, state="disabled")
+        self.btn_show_more.pack(side="left", padx=10)
 
-        self.btn_next = ctk.CTkButton(self.controls_frame, text="Next >>", width=100, command=self.next_page, state="disabled")
-        self.btn_next.pack(side="right")
+        self.btn_show_all = ctk.CTkButton(self.controls_frame, text="Show All", width=120, command=self.show_all, state="disabled")
+        self.btn_show_all.pack(side="right", padx=10)
 
     def create_settings_frame(self):
         self.settings_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -222,53 +220,59 @@ class ChanMediaScanner(ctk.CTk):
         self.lbl_status.configure(text=f"Found {count} media files{source}.", text_color="green")
         self.btn_scan.configure(state="normal")
         
-        self.current_page = 0
+        self.visible_limit = 16
         self.selected_urls.clear()
         self.update_preview_page()
 
     def update_preview_page(self):
         # Clear existing
+        self.active_vars = {}
         for widget in self.preview_frame.winfo_children():
             widget.destroy()
 
         if not self.current_media:
             return
 
-        total_pages = math.ceil(len(self.current_media) / self.items_per_page)
+        visible_items = self.current_media[:self.visible_limit]
         
-        start_idx = self.current_page * self.items_per_page
-        end_idx = start_idx + self.items_per_page
-        page_items = self.current_media[start_idx:end_idx]
-
         # Update controls
-        self.lbl_page.configure(text=f"Page {self.current_page + 1} of {total_pages}")
-        self.btn_prev.configure(state="normal" if self.current_page > 0 else "disabled")
-        self.btn_next.configure(state="normal" if end_idx < len(self.current_media) else "disabled")
+        total_count = len(self.current_media)
+        showing_count = len(visible_items)
+        
+        # Status update (showing X of Y)
+        # self.lbl_status.configure(text=f"Showing {showing_count} of {total_count} files.")
+        
+        self.btn_show_more.configure(state="normal" if showing_count < total_count else "disabled")
+        self.btn_show_all.configure(state="normal" if showing_count < total_count else "disabled")
 
-        if not page_items:
+        if not visible_items:
             ctk.CTkLabel(self.preview_frame, text="No media to display.").pack(pady=20)
             return
 
         # Load thumbnails
-        threading.Thread(target=self.load_thumbnails, args=(page_items,), daemon=True).start()
+        threading.Thread(target=self.load_thumbnails, args=(visible_items,), daemon=True).start()
 
     def load_thumbnails(self, items):
         for index, url in enumerate(items):
             try:
-                base, ext = os.path.splitext(url)
-                thumb_url = base + "s.jpg"
+                if url in self.image_cache:
+                    ctk_image = self.image_cache[url]
+                else:
+                    base, ext = os.path.splitext(url)
+                    thumb_url = base + "s.jpg"
 
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                req = urllib.request.Request(thumb_url, headers=headers)
-                
-                with urllib.request.urlopen(req) as response:
-                    data = response.read()
-                
-                img_data = BytesIO(data)
-                pil_image = Image.open(img_data)
-                pil_image.thumbnail((150, 150))
-                
-                ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=pil_image.size)
+                    headers = {'User-Agent': 'Mozilla/5.0'}
+                    req = urllib.request.Request(thumb_url, headers=headers)
+                    
+                    with urllib.request.urlopen(req) as response:
+                        data = response.read()
+                    
+                    img_data = BytesIO(data)
+                    pil_image = Image.open(img_data)
+                    pil_image.thumbnail((150, 150))
+                    
+                    ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=pil_image.size)
+                    self.image_cache[url] = ctk_image
                 
                 # Pass to UI
                 self.after(0, lambda u=url, i=ctk_image, n=index: self.add_preview_item(u, i, n))
@@ -283,36 +287,41 @@ class ChanMediaScanner(ctk.CTk):
     def add_preview_item(self, url, ctk_img, index):
         if index == -1: return # Error case
 
-        row = index // 5
-        col = index % 5
+        row = index // 4
+        col = index % 4
 
         # Card Frame
         frame = ctk.CTkFrame(self.preview_frame, fg_color=("gray85", "gray20"))
         frame.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
 
+        # Inner Layout
+        frame.grid_columnconfigure(0, weight=1)
+
         # Image
         if ctk_img:
             lbl_img = ctk.CTkLabel(frame, text="", image=ctk_img)
-            lbl_img.pack(padx=5, pady=5)
+            lbl_img.grid(row=0, column=0, padx=5, pady=5)
         else:
             lbl_img = ctk.CTkLabel(frame, text="No Preview", width=100, height=100)
-            lbl_img.pack(padx=5, pady=5)
+            lbl_img.grid(row=0, column=0, padx=5, pady=5)
 
         # Truncated Filename
         filename = url.split('/')[-1]
         display_name = (filename[:15] + '..') if len(filename) > 15 else filename
-        ctk.CTkLabel(frame, text=display_name, font=ctk.CTkFont(size=11)).pack()
+        ctk.CTkLabel(frame, text=display_name, font=ctk.CTkFont(size=11)).grid(row=1, column=0, pady=(0, 2))
 
-        # Checkbox
+        # Checkbox (No text)
         var_select = ctk.BooleanVar(value=url in self.selected_urls)
-        chk = ctk.CTkCheckBox(frame, text="Select", variable=var_select, width=60, height=20,
+        self.active_vars[url] = var_select
+        
+        chk = ctk.CTkCheckBox(frame, text="", variable=var_select, width=20, height=20,
                               command=lambda u=url, v=var_select: self.toggle_selection(u, v))
-        chk.pack(pady=2)
+        chk.grid(row=2, column=0, pady=2)
 
         # Download Button
         btn_dl = ctk.CTkButton(frame, text="Download", height=20, width=80, font=("Arial", 10),
                                command=lambda u=url: self.download_single_wrapper(u))
-        btn_dl.pack(pady=(2, 5))
+        btn_dl.grid(row=3, column=0, pady=(2, 10))
 
     def toggle_selection(self, url, var):
         if var.get():
@@ -321,16 +330,18 @@ class ChanMediaScanner(ctk.CTk):
             self.selected_urls.discard(url)
 
     def select_all(self):
-        start_idx = self.current_page * self.items_per_page
-        end_idx = start_idx + self.items_per_page
-        items = self.current_media[start_idx:end_idx]
-        for url in items:
+        # Update set
+        for url in self.current_media:
             self.selected_urls.add(url)
-        self.update_preview_page() # Refresh UI to show checked
+        # Update visible
+        for url, search_var in self.active_vars.items():
+            search_var.set(True)
 
     def select_none(self):
         self.selected_urls.clear()
-        self.update_preview_page()
+        for url, search_var in self.active_vars.items():
+            search_var.set(False)
+
 
     def download_selected(self):
         if not self.selected_urls:
@@ -341,21 +352,31 @@ class ChanMediaScanner(ctk.CTk):
         threading.Thread(target=self.download_bulk, args=(urls,), daemon=True).start()
 
     def download_single_wrapper(self, url):
-         messagebox.showinfo("Download", f"Starting download...")
+         self.lbl_status.configure(text=f"Queueing download...", text_color="cyan")
          threading.Thread(target=self.download_with_retry, args=(url,), daemon=True).start()
 
     def download_bulk(self, urls):
         # Notify start
-        self.after(0, lambda: messagebox.showinfo("Download", f"Starting background download of {len(urls)} files."))
+        self.lbl_status.configure(text=f"Starting download of {len(urls)} files.", text_color="cyan")
         
         success_count = 0
-        for url in urls:
+        for i, url in enumerate(urls):
+            filename = url.split('/')[-1]
+            self.lbl_status.configure(text=f"Downloading {filename} ({i+1}/{len(urls)})...", text_color="cyan")
             if self.download_with_retry(url):
                 success_count += 1
-            # Add delay between bulk downloads to avoid 429
+            # Add delay
             time.sleep(1.5)
         
-        self.after(0, lambda c=success_count: messagebox.showinfo("Completed", f"Downloaded {c} files."))
+        self.lbl_status.configure(text=f"Completed. Downloaded {success_count} files.", text_color="green")
+
+    def show_more(self):
+        self.visible_limit += 16
+        self.update_preview_page()
+
+    def show_all(self):
+        self.visible_limit = len(self.current_media)
+        self.update_preview_page()
 
     def download_with_retry(self, url, retries=3):
         filename = url.split('/')[-1]
@@ -385,15 +406,6 @@ class ChanMediaScanner(ctk.CTk):
                 break
         return False
 
-    def prev_page(self):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.update_preview_page()
-
-    def next_page(self):
-        if (self.current_page + 1) * self.items_per_page < len(self.current_media):
-            self.current_page += 1
-            self.update_preview_page()
 
 if __name__ == "__main__":
     app = ChanMediaScanner()
